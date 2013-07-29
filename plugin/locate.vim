@@ -1,5 +1,9 @@
 " locate.vim
 
+if (exists('g:locate_disable') && g:locate_disable) || &compatible
+  finish
+endif
+
 if !exists('g:locate_highlight')
   let g:locate_highlight = 'Search'
 endif
@@ -26,7 +30,11 @@ if !exists('g:locate_smart_case')
 endif
 
 command! -bang -nargs=* Locate call locate#pattern(<q-args>, <bang>0)
+command! -bang -nargs=* L call locate#pattern(<q-args>, <bang>0)
+command! -bang Lpurge call locate#purge(<bang>0)
+command! Lrefresh call locate#refresh()
 
-nnoremap <silent> gl :call locate#cword()<cr>
-vnoremap <silent> gl :call locate#selection()<cr>
-nnoremap <silent> gL :call locate#refresh()<cr>
+nnoremap <silent> gl :call locate#cword(0)<cr>
+vnoremap <silent> gl :call locate#selection(0)<cr>
+nnoremap <silent> gL :call locate#cword(1)<cr>
+vnoremap <silent> gL :call locate#selection(1)<cr>
