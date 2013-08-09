@@ -49,15 +49,27 @@ function! s:get_unused_non_identifier(pattern)
   throw 'All the non-ID characters are used!'
 endfunction
 
-function! s:get_prefixes(pattern)
-  " returns a list of prefix characters from pattern (e.g. c, V)
-  let prefixes = []
-  let pattern = a:pattern
-  while pattern[0] ==# '\'
-    call add(prefixes, pattern[1])
-    let pattern = pattern[2:]
-  endwhile
-  return prefixes
+function! s:get_case_mode(pattern)
+  " returns any pattern specified case mode
+  " note that any case insensitive flag will override others
+  if match(a:pattern, '\C\\c') >=# 0
+    return 'c'
+  elseif match(a:pattern, '\C\\C') >=# 0
+    return 'C'
+  else
+    return ''
+  endif
+endfunction
+
+function! s:get_magic_mode(pattern)
+  " return any pattern specified initial magic mode
+  " any magic mode toggles within the pattern are not detected
+  let matches = matchlist(a:pattern, '\C^\\\([mMvV]\)')
+  if len(matches)
+    return matches[1]
+  else
+    return ''
+  endif
 endfunction
 
 function! s:is_wrapped(pattern)
@@ -65,7 +77,7 @@ function! s:is_wrapped(pattern)
   let char = a:pattern[0]
   if !s:is_identifier(char)
     let parts = split(a:pattern, char, 1)
-    return len(parts) ==# 3 && match(parts[2], '[^gj]') <# 0
+    return len(parts) ==# 3 && !strlen(parts[2])
   endif
   return 0
 endfunction
@@ -73,40 +85,65 @@ endfunction
 function! s:wrap(pattern)
   " wrap pattern and add user setting
   let wrapper = s:get_unused_non_identifier(a:pattern)
-  let flags = ''
+  let flags = 'j'
   if g:locate_global
     let flags .= 'g'
   endif
-  if !g:locate_jump
-    let flags .= 'j'
+  if s:is_wrapped(a:pattern)
+    let empty_pattern = split(a:pattern, a:pattern[0])
+  else
+    let empty_pattern = a:pattern
   endif
   let prefix = ''
-  let prefixes = s:get_prefixes(a:pattern)
-  if match(prefixes, '[cC]') <# 0 && &ignorecase
-    if g:locate_smart_case && match(a:pattern, '\C[A-Z]') >=# 0
+  if !strlen(s:get_case_mode(empty_pattern)) && &ignorecase
+    if g:locate_smart_case && match(empty_pattern, '\C[A-Z]') >=# 0
       let prefix .= '\C'
     else
       let prefix .= '\c'
     endif
   endif
-  if match(prefixes, '[vVmM]') <# 0 && g:locate_very_magic
+  if !strlen(s:get_magic_mode(empty_pattern)) && g:locate_very_magic
     let prefix .= '\v'
   endif
-  return wrapper . prefix . a:pattern . wrapper . flags
+  return  wrapper . prefix . empty_pattern . wrapper . flags
 endfunction
 
 " Searching
+
+function s:generate_id()
+  " return unique id used per window
+   let s:locate_index += 1
+   return s:locate_index
+endfunction
+
+function! s:location_list_sorter(first, second)
+  " sort location list by line and column number
+  if a:first.lnum ># a:second.lnum
+    return 1
+  elseif a:first.lnum <# a:second.lnum
+    return -1
+  else
+    if a:first.col ># a:second.col
+      return 1
+    elseif a:first.col <# a:second.col
+      return -1
+    else
+      return 0
+    endif
+  endif
+endfunction
 
 function! s:locate(pattern, add)
   " runs lvimgrep for pattern in current window (also adds a mark at initial position)
   if !exists('w:locate_id')
     let w:locate_id = s:generate_id()
   endif
+  let w:locate_bufnr = bufnr('%')
   if strlen(g:locate_initial_mark) && !a:add
     execute 'normal! m' . g:locate_initial_mark
   endif
-  if s:is_wrapped(a:pattern)
-    let wrapped_pattern = a:pattern
+  if !strlen(a:pattern)
+    let wrapped_pattern = s:wrap(getreg('/'))
   else
     let wrapped_pattern = s:wrap(a:pattern)
   endif
@@ -120,11 +157,69 @@ function! s:locate(pattern, add)
     execute cmd . wrapped_pattern . ' %'
   catch /^Vim\%((\a\+)\)\=:E480/
   finally
-    return [w:locate_id, wrapped_pattern]
+    let loclist = getloclist(0)
+    if len(loclist) && g:locate_sort
+      call setloclist(0, sort(loclist, 's:location_list_sorter'))
+    endif
+    return w:locate_id
   endtry
 endfunction
 
-" Highlighting managing
+" Jumps
+
+function! s:get_next(position)
+  " get line number of next location list match
+  let elem_index = 1
+  for elem in getloclist(0)
+    if elem['lnum'] <# a:position[1]
+      let elem_index += 1
+    elseif elem['lnum'] ==# a:position[1] && elem['col'] <=# a:position[2]
+      let elem_index += 1
+    else
+      return elem_index
+    endif
+  endfor
+  return 1
+endfunction
+
+function! s:get_closest(position)
+  " get line number of next location list match
+  let elem_index = 0
+  let min_line_distance = 1 / 0
+  for elem in getloclist(0)
+    let elem_line_distance = abs(elem['lnum'] - a:position[1])
+    let elem_col_distance = abs(elem['col'] - a:position[2])
+    if elem_line_distance <# min_line_distance
+      let min_line_distance = elem_line_distance
+      let min_col_distance = elem_col_distance
+    elseif elem_line_distance ==# min_line_distance
+      if elem_col_distance <# min_col_distance
+        let min_col_distance = elem_col_distance
+      elseif elem_line_distance ==# 0
+        return elem_index
+      endif
+    else
+      return elem_index
+    endif
+    let elem_index += 1
+  endfor
+  return elem_index
+endfunction
+
+function! s:jump(position)
+  " jump to match depending on g:locate_jump_to
+  if g:locate_jump_to ==# 'first'
+    execute '1ll'
+  elseif g:locate_jump_to ==# 'next'
+    execute s:get_next(a:position) . 'll'
+  elseif g:locate_jump_to ==# 'closest'
+    execute s:get_closest(a:position) . 'll'
+  elseif g:locate_jump_to !=# 'stay'
+    echoerr 'Invalid g:locate_jump_to option: ' . g:locate_jump_to
+  endif
+endfunction
+
+" Highlighting
 
 function! s:create_highlight_group(base_group)
   " create highlight group Locate copied from base_group
@@ -140,7 +235,7 @@ endfunction
 function! s:remove_highlight(locate_id)
   " remove highlight corresponding to locate id
   let preserve_cmd = s:preserve_history_command()
-  let match_ids = remove(s:match_ids, a:locate_id) 
+  let match_ids = remove(s:match_ids, a:locate_id)
   for win_nr in range(1, winnr('$'))
     let locate_id = getwinvar(win_nr, 'locate_id')
     if locate_id ==# a:locate_id
@@ -157,16 +252,25 @@ endfunction
 
 " Window handling
 
-function s:generate_id()
-  " return unique id used per window
-   let s:locate_index += 1
-   return s:locate_index
+function! s:get_window_nr(locate_id)
+  " get the window number associated with locate id
+  for win_nr in range(1, winnr('$'))
+    let locate_id = getwinvar(win_nr, 'locate_id')
+    if locate_id ==# a:locate_id
+      return win_nr
+    endif
+  endfor
+endfunction
+
+function! s:preserve_history_command()
+  " returns commands to go back to current window, preserving previous window as well
+  return winnr('#') . 'wincmd w | ' . winnr() . 'wincmd w'
 endfunction
 
 function! s:purge(locate_id)
   " close location list associated to this id
   for [buf_nr, locate_id] in items(s:locate_ids)
-    if locate_id ==# a:locate_id
+    if locate_id ==# a:locate_id && bufwinnr(str2nr(buf_nr)) !=# -1
       execute 'bdelete ' . buf_nr
     endif
   endfor
@@ -174,10 +278,11 @@ endfunction
 
 function! s:purge_hidden()
   " close location lists where the associated window is not present
+  " also close location lists where associated buffer has changed
   let open_locate_ids = []
   for win_nr in range(1, winnr('$'))
     let locate_id = getwinvar(win_nr, 'locate_id')
-    if locate_id
+    if locate_id && winbufnr(win_nr) ==# getwinvar(win_nr, 'locate_bufnr')
       call add(open_locate_ids, locate_id)
     endif
   endfor
@@ -202,80 +307,58 @@ function! s:purge_tab()
   endfor
 endfunction
 
-function! s:get_window_nr(locate_id)
-  " goes to the window with locate id
-  for win_nr in range(1, winnr('$'))
-    let locate_id = getwinvar(win_nr, 'locate_id')
-    if locate_id ==# a:locate_id
-      return win_nr
-    endif
-  endfor
-endfunction
-
-function! s:preserve_history_command()
-  " returns commands to go back to current window, preserving previous window as well
-  return winnr('#') . 'wincmd w | ' . winnr() . 'wincmd w'
-endfunction
-
 function! s:open_location_list(height, patterns)
   " open location list (also does formatting and highlighting)
-  echom 'patterns: ' . string(a:patterns)
   let locate_id = w:locate_id
   let preserve_cmd = s:preserve_history_command()
+  let position = getpos('.')
   let s:match_ids[locate_id] = []
   let empty_patterns = []
   for pattern in a:patterns
-    let [nothing, empty_pattern, flags] = split(pattern, pattern[0], 1)
+    if s:is_wrapped(pattern)
+      let [nothing, empty_pattern, flags] = split(pattern, pattern[0], 1)
+    else
+      let empty_pattern = pattern
+    endif
     call add(s:match_ids[locate_id], matchadd(g:locate_highlight, empty_pattern))
     call add(empty_patterns, empty_pattern)
-    echom 'adding highlight for pattern ' . empty_pattern
   endfor
   execute 'lopen ' . a:height
-  let s:locate_ids[bufnr('%')] = locate_id
+  let list_bufnr = bufnr('%')
+  let s:locate_ids[list_bufnr] = locate_id
   for empty_pattern in empty_patterns
     call matchadd(g:locate_highlight, empty_pattern)
   endfor
   setlocal modifiable
-  silent execute '%s/^[^|]\+|\(\d\+\) col \(\d\+\)/\1|\2/'
+  silent execute '%s/^[^|]\+|\(\d\+\) col \(\d\+\)/%|\1,\2/'
   setlocal nomodified
   setlocal nomodifiable
   setlocal foldcolumn=0
   silent execute 'normal! gg'
   autocmd! BufWinLeave <buffer> call <SID>remove_highlight(remove(s:locate_ids, expand('<abuf>')))
-  if !g:locate_focus
+  call s:jump(position)
+  if g:locate_focus
+    execute list_bufnr . 'wincmd w'
+  else
     execute preserve_cmd
   endif
 endfunction
 
 " Public functions
 
-if strlen(g:locate_highlight)
-  call s:create_highlight_group(g:locate_highlight)
-endif
-
-augroup locate
-  autocmd!
-  autocmd BufEnter * nested call <SID>purge_hidden()
-augroup END
-
 function! locate#pattern(pattern, add)
   " main public function
   " finds matches of pattern
   " opens location list
-  let cur_bufnr = bufnr('%')
-  if has_key(s:locate_ids, cur_bufnr)
-    execute cur_bufnr . 'wincmd w'
-  endif
-  if !&buftype
+  " jumps to match as determined by g:locate_jump_to
+  if !strlen(&buftype)
     execute 'lclose'
-    let [locate_id, wrapped_pattern] = s:locate(a:pattern, a:add)
+    let locate_id = s:locate(a:pattern, a:add)
     let total_matches = len(getloclist(0))
     if !a:add || !has_key(s:searches, locate_id)
-      echom 'new searches list. add:' . a:add
-      let s:searches[locate_id] = [wrapped_pattern]
+      let s:searches[locate_id] = [a:pattern]
     else
-      echom 'adding to search list'
-      call add(s:searches[locate_id], wrapped_pattern)
+      call add(s:searches[locate_id], a:pattern)
     endif
     redraw!
     echo total_matches . ' match(es) found.'
@@ -309,36 +392,6 @@ function! locate#selection(add) range
   endif
 endfunction
 
-function! locate#refresh()
-  " refresh location list(s) associated with current
-  let cur_bufnr = bufnr('%')
-  if has_key(s:locate_ids, cur_bufnr)
-    execute cur_bufnr . 'wincmd w'
-  endif
-  if !&buftype
-    execute 'lclose'
-    if !exists('w:locate_id') || !has_key(s:searches, w:locate_id)
-      echoerr 'No searches to refresh.'
-    else
-      let searches = s:searches[w:locate_id]
-      let search_index = 0
-      for search in searches
-        call s:locate(search, search_index ># 0)
-        let search_index += 1
-      endfor
-      let total_matches = len(getloclist(0))
-      redraw!
-      echo total_matches . ' match(es) found.'
-      if total_matches
-        let height = min([total_matches, g:locate_max_height])
-        call s:open_location_list(height, searches)
-      endif
-    endif
-  else
-    echoerr 'Invalid buffer.'
-  endif
-endfunction
-
 function! locate#purge(all)
   " close location list(s) associated with current or all buffers in tab
   if a:all
@@ -349,3 +402,49 @@ function! locate#purge(all)
     endif
   endif
 endfunction
+
+function! locate#refresh(silent)
+  " refresh location list associated with current buffer
+  " if silent is true, only does so if the location list is open and keeps the
+  " cursor in place always
+  " if silent is false, repeats last search and jumps to match (determined by
+  " g:locate_jump_to) or raises an error if there is no search to refresh
+  if !exists('w:locate_id') || !has_key(s:searches, w:locate_id)
+    if !a:silent
+      echoerr 'No searches to refresh.'
+    endif
+  elseif !a:silent || match(values(s:locate_ids), w:locate_id) ># -1
+    let view = winsaveview()
+    execute 'lclose'
+    let searches = s:searches[w:locate_id]
+    let search_index = 0
+    for search in searches
+      call s:locate(search, search_index ># 0)
+      let search_index += 1
+    endfor
+    let total_matches = len(getloclist(0))
+    if total_matches
+      let height = min([total_matches, g:locate_max_height])
+      call s:open_location_list(height, searches)
+    endif
+    if a:silent
+      call winrestview(view)
+    endif
+    redraw!
+    echo total_matches . ' match(es) found.'
+  endif
+endfunction
+
+" Setup
+
+if strlen(g:locate_highlight)
+  call s:create_highlight_group(g:locate_highlight)
+endif
+
+augroup locate_private
+  autocmd!
+  autocmd BufEnter * nested call <SID>purge_hidden()
+  if g:locate_refresh
+    autocmd BufWrite * nested call locate#refresh(1)
+  endif
+augroup END
