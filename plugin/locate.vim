@@ -23,10 +23,10 @@ if !exists('g:locate_jump_to')
   let g:locate_jump_to = 'first'
 endif
 if !exists('g:locate_very_magic')
-  let g:locate_very_magic = 1
+  let g:locate_very_magic = 0
 endif
 if !exists('g:locate_smartcase')
-  let g:locate_smartcase = 1
+  let g:locate_smartcase = 0
 endif
 if !exists('g:locate_refresh')
   let g:locate_refresh = 1
@@ -34,13 +34,18 @@ endif
 if !exists('g:locate_sort')
   let g:locate_sort = 1
 endif
+if !exists('g:locate_mappings')
+  let g:locate_mappings = 1
+endif
 
-command! -bang -nargs=* Locate call locate#pattern(<q-args>, <bang>0)
-command! -bang -nargs=* L call locate#pattern(<q-args>, <bang>0)
+command! -bang -nargs=* Locate call locate#input(<q-args>, <bang>0)
+command! -bang -nargs=* L call locate#input(<q-args>, <bang>0)
 command! -bang Lpurge call locate#purge(<bang>0)
-command! -bang Lrefresh call locate#refresh(<bang>0)
+command! -bang -nargs=? Lrefresh call locate#refresh(<q-args>, <bang>0)
 
-nnoremap <silent> gl :call locate#cword(0)<cr>
-vnoremap <silent> gl :call locate#selection(0)<cr>
-nnoremap <silent> gL :call locate#cword(1)<cr>
-vnoremap <silent> gL :call locate#selection(1)<cr>
+if g:locate_mappings
+  nnoremap <silent> gl :call locate#cword(0)<cr>
+  xnoremap <silent> gl :call locate#selection(0)<cr>
+  nnoremap <silent> gL :call locate#cword(1)<cr>
+  xnoremap <silent> gL :call locate#selection(1)<cr>
+endif
